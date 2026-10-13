@@ -3,8 +3,8 @@ package azuread
 import (
 	"context"
 
-	"github.com/turbot/steampipe-plugin-sdk/v6/plugin"
-	"github.com/turbot/steampipe-plugin-sdk/v6/plugin/transform"
+	"github.com/turbot/steampipe-plugin-sdk/v5/plugin"
+	"github.com/turbot/steampipe-plugin-sdk/v5/plugin/transform"
 )
 
 const pluginName = "steampipe-plugin-azuread"
@@ -60,6 +60,7 @@ func Plugin(ctx context.Context) *plugin.Plugin {
 			"azuread_service_principal_app_role_assignment":        tableAzureAdServicePrincipalAppRoleAssignment(ctx),
 			"azuread_service_principal":                            tableAzureAdServicePrincipal(ctx),
 			"azuread_sign_in_report":                               tableAzureAdSignInReport(ctx),
+			"azuread_subscribed_sku":                               tableAzureAdSubscribedSku(ctx),
 			"azuread_user_app_role_assignment":                     tableAzureAdUserAppRoleAssignment(ctx),
 			"azuread_user_registration_details_report":             tableAzureAdUserRegistrationDetailsReport(ctx),
 			"azuread_user":                                         tableAzureAdUser(ctx),

@@ -1,7 +1,7 @@
 package azuread
 
 import (
-	"github.com/turbot/steampipe-plugin-sdk/v6/plugin"
+	"github.com/turbot/steampipe-plugin-sdk/v5/plugin"
 )
 
 type azureADConfig struct {
@@ -21,9 +21,9 @@ func ConfigInstance() interface{} {
 
 // GetConfig :: retrieve and cast connection config from query data
 func GetConfig(connection *plugin.Connection) azureADConfig {
-	if connection == nil || connection.GetConfig() == nil {
+	if connection == nil || connection.Config == nil {
 		return azureADConfig{}
 	}
-	config, _ := connection.GetConfig().(azureADConfig)
+	config, _ := connection.Config.(azureADConfig)
 	return config
 }

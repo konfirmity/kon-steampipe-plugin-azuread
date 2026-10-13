@@ -13,7 +13,7 @@ require (
 	github.com/microsoftgraph/msgraph-beta-sdk-go v0.151.0
 	github.com/microsoftgraph/msgraph-sdk-go v1.37.0
 	github.com/microsoftgraph/msgraph-sdk-go-core v1.4.0
-	github.com/turbot/steampipe-plugin-sdk/v6 v6.0.0
+	github.com/turbot/steampipe-plugin-sdk/v5 v5.14.0
 )
 
 require (
