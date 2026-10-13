@@ -1,6 +1,8 @@
 package azuread
 
 import (
+	"context"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -66,12 +68,51 @@ func TestIntuneManagedDeviceDecodesGraphPayload(t *testing.T) {
 		t.Errorf("GetAzureADDeviceId() = %v", got)
 	}
 	wantSync := time.Date(2026, 10, 12, 23, 59, 1, 0, time.UTC)
-	if got := info.GetLastSyncDateTime(); got == nil || !got.Equal(wantSync) {
-		t.Errorf("GetLastSyncDateTime() = %v, want %v", got, wantSync)
+	if got := info.LastSyncDateTime(); got == nil || !got.Equal(wantSync) {
+		t.Errorf("LastSyncDateTime() = %v, want %v", got, wantSync)
 	}
 	wantEnrolled := time.Date(2025, 2, 3, 4, 5, 6, 0, time.UTC)
-	if got := info.GetEnrolledDateTime(); got == nil || !got.Equal(wantEnrolled) {
-		t.Errorf("GetEnrolledDateTime() = %v, want %v", got, wantEnrolled)
+	if got := info.EnrolledDateTime(); got == nil || !got.Equal(wantEnrolled) {
+		t.Errorf("EnrolledDateTime() = %v, want %v", got, wantEnrolled)
+	}
+}
+
+// Graph sends 0001-01-01T00:00:00Z for a device that never enrolled, synced or entered a grace
+// period; passed through, the app would store it as a real date.
+func TestIntuneManagedDevicePlaceholderDatesAreNull(t *testing.T) {
+	info := decodeManagedDevice(t, `{
+		"enrolledDateTime": "0001-01-01T00:00:00Z",
+		"lastSyncDateTime": "0001-01-01T00:00:00Z",
+		"complianceGracePeriodExpirationDateTime": "0001-01-01T00:00:00Z"
+	}`)
+
+	if got := info.EnrolledDateTime(); got != nil {
+		t.Errorf("EnrolledDateTime() = %v, want nil", *got)
+	}
+	if got := info.LastSyncDateTime(); got != nil {
+		t.Errorf("LastSyncDateTime() = %v, want nil", *got)
+	}
+	if got := info.ComplianceGracePeriodExpirationDateTime(); got != nil {
+		t.Errorf("ComplianceGracePeriodExpirationDateTime() = %v, want nil", *got)
+	}
+}
+
+// FromMethod resolves by reflection at query time, so a misspelt method only fails on a live read.
+func TestIntuneManagedDeviceColumnMethodsExist(t *testing.T) {
+	infoType := reflect.TypeOf(&ADIntuneManagedDeviceInfo{})
+	for _, column := range tableAzureAdIntuneManagedDevice(context.Background()).Columns {
+		if column.Transform == nil {
+			continue
+		}
+		for _, call := range column.Transform.Transforms {
+			name, ok := call.Param.(string)
+			if !ok {
+				continue
+			}
+			if _, found := infoType.MethodByName(name); !found {
+				t.Errorf("column %s reads method %s, which ADIntuneManagedDeviceInfo lacks", column.Name, name)
+			}
+		}
 	}
 }
 
