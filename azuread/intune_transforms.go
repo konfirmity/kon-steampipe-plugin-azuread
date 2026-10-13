@@ -3,8 +3,25 @@ package azuread
 import (
 	"time"
 
+	betamodels "github.com/microsoftgraph/msgraph-beta-sdk-go/models"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 )
+
+type ADIntuneDetectedAppInfo struct {
+	betamodels.DetectedAppable
+	managedDeviceID string
+}
+
+func (a *ADIntuneDetectedAppInfo) ManagedDeviceID() *string {
+	return &a.managedDeviceID
+}
+
+func (a *ADIntuneDetectedAppInfo) Platform() *string {
+	if a.GetPlatform() == nil {
+		return nil
+	}
+	return stringPtr(a.GetPlatform().String())
+}
 
 type ADIntuneManagedDeviceInfo struct {
 	models.ManagedDeviceable
