@@ -3,8 +3,8 @@ package azuread
 import (
 	"context"
 
-	"github.com/turbot/steampipe-plugin-sdk/v6/plugin"
-	"github.com/turbot/steampipe-plugin-sdk/v6/plugin/transform"
+	"github.com/turbot/steampipe-plugin-sdk/v5/plugin"
+	"github.com/turbot/steampipe-plugin-sdk/v5/plugin/transform"
 )
 
 const pluginName = "steampipe-plugin-azuread"
@@ -52,11 +52,15 @@ func Plugin(ctx context.Context) *plugin.Plugin {
 			"azuread_group_app_role_assignment":                    tableAzureAdGroupAppRoleAssignment(ctx),
 			"azuread_group":                                        tableAzureAdGroup(ctx),
 			"azuread_identity_provider":                            tableAzureAdIdentityProvider(ctx),
+			"azuread_intune_managed_device":                        tableAzureAdIntuneManagedDevice(ctx),
+			"azuread_secure_score_control_score":                   tableAzureAdSecureScoreControlScore(ctx),
+			"azuread_security_alert":                               tableAzureAdSecurityAlert(ctx),
 			"azuread_security_defaults_policy":                     tableAzureAdSecurityDefaultsPolicy(ctx),
 			"azuread_service_principal_app_role_assigned_to":       tableAzureAdServicePrincipalAppRoleAssignedTo(ctx),
 			"azuread_service_principal_app_role_assignment":        tableAzureAdServicePrincipalAppRoleAssignment(ctx),
 			"azuread_service_principal":                            tableAzureAdServicePrincipal(ctx),
 			"azuread_sign_in_report":                               tableAzureAdSignInReport(ctx),
+			"azuread_subscribed_sku":                               tableAzureAdSubscribedSku(ctx),
 			"azuread_user_app_role_assignment":                     tableAzureAdUserAppRoleAssignment(ctx),
 			"azuread_user_registration_details_report":             tableAzureAdUserRegistrationDetailsReport(ctx),
 			"azuread_user":                                         tableAzureAdUser(ctx),

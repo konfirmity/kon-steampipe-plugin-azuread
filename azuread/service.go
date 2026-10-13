@@ -18,7 +18,7 @@ import (
 	a "github.com/microsoft/kiota-authentication-azure-go"
 	msgraphsdkbeta "github.com/microsoftgraph/msgraph-beta-sdk-go"
 	msgraphsdkgo "github.com/microsoftgraph/msgraph-sdk-go"
-	"github.com/turbot/steampipe-plugin-sdk/v6/plugin"
+	"github.com/turbot/steampipe-plugin-sdk/v5/plugin"
 )
 
 const (
@@ -408,7 +408,7 @@ func getTenantFromCLI() (string, error) {
 
 	output, err := cliCmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("Invoking Azure CLI failed with the following error: %v", err)
+		return "", fmt.Errorf("invoking Azure CLI failed with the following error: %v", err)
 	}
 
 	var tokenResponse struct {
