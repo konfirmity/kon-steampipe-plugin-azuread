@@ -18,7 +18,7 @@ import (
 	a "github.com/microsoft/kiota-authentication-azure-go"
 	msgraphsdkbeta "github.com/microsoftgraph/msgraph-beta-sdk-go"
 	msgraphsdkgo "github.com/microsoftgraph/msgraph-sdk-go"
-	"github.com/turbot/steampipe-plugin-sdk/v5/plugin"
+	"github.com/turbot/steampipe-plugin-sdk/v6/plugin"
 )
 
 const (

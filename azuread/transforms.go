@@ -6,7 +6,7 @@ import (
 
 	betamodels "github.com/microsoftgraph/msgraph-beta-sdk-go/models"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
-	"github.com/turbot/steampipe-plugin-sdk/v5/plugin/transform"
+	"github.com/turbot/steampipe-plugin-sdk/v6/plugin/transform"
 )
 
 type ADAdminConsentRequestPolicyInfo struct {
