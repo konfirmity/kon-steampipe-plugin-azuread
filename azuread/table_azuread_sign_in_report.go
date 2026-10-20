@@ -2,6 +2,9 @@ package azuread
 
 import (
 	"context"
+	"fmt"
+	"strings"
+	"time"
 
 	msgraphcore "github.com/microsoftgraph/msgraph-sdk-go-core"
 	"github.com/microsoftgraph/msgraph-sdk-go/auditlogs"
@@ -27,6 +30,10 @@ func tableAzureAdSignInReport(_ context.Context) *plugin.Table {
 		},
 		List: &plugin.ListConfig{
 			Hydrate: listAdSignInReports,
+			KeyColumns: plugin.KeyColumnSlice{
+				{Name: "created_date_time", Require: plugin.Optional, Operators: []string{">", ">=", "=", "<", "<="}},
+				{Name: "client_app_used", Require: plugin.Optional},
+			},
 		},
 
 		Columns: commonColumns([]*plugin.Column{
@@ -87,6 +94,11 @@ func listAdSignInReports(ctx context.Context, d *plugin.QueryData, _ *plugin.Hyd
 		}
 	}
 
+	if filter := buildSignInReportQueryFilter(d.Quals); len(filter) > 0 {
+		joined := strings.Join(filter, " and ")
+		input.Filter = &joined
+	}
+
 	options := &auditlogs.SignInsRequestBuilderGetRequestConfiguration{
 		QueryParameters: input,
 	}
@@ -119,6 +131,49 @@ func listAdSignInReports(ctx context.Context, d *plugin.QueryData, _ *plugin.Hyd
 	}
 
 	return nil, nil
+}
+
+// buildSignInReportQueryFilter renders the pushed-down quals as an OData $filter, so Graph pages
+// through only the matching sign-ins instead of the whole log. Graph filters createdDateTime with
+// eq, le and ge only, and compares to the second, so every bound is widened to whole seconds and
+// strict operators become inclusive ones; Postgres rechecks the quals on the returned rows.
+func buildSignInReportQueryFilter(keyQuals plugin.KeyColumnQualMap) []string {
+	filters := []string{}
+
+	if keyQuals["created_date_time"] != nil {
+		for _, q := range keyQuals["created_date_time"].Quals {
+			givenTime := q.Value.GetTimestampValue().AsTime().UTC()
+			floor := givenTime.Truncate(time.Second)
+			ceil := floor
+			if ceil.Before(givenTime) {
+				ceil = ceil.Add(time.Second)
+			}
+			switch q.Operator {
+			case ">", ">=":
+				filters = append(filters, fmt.Sprintf("createdDateTime ge %s", floor.Format(time.RFC3339)))
+			case "<", "<=":
+				filters = append(filters, fmt.Sprintf("createdDateTime le %s", ceil.Format(time.RFC3339)))
+			case "=":
+				filters = append(filters,
+					fmt.Sprintf("createdDateTime ge %s", floor.Format(time.RFC3339)),
+					fmt.Sprintf("createdDateTime le %s", ceil.Format(time.RFC3339)))
+			}
+		}
+	}
+
+	// An IN list reaches here one value at a time: the SDK makes a list call per value.
+	if keyQuals["client_app_used"] != nil {
+		for _, q := range keyQuals["client_app_used"].Quals {
+			if q.Operator != "=" {
+				continue
+			}
+			if app := q.Value.GetStringValue(); app != "" {
+				filters = append(filters, fmt.Sprintf("clientAppUsed eq '%s'", strings.ReplaceAll(app, "'", "''")))
+			}
+		}
+	}
+
+	return filters
 }
 
 //// HYDRATE FUNCTIONS
