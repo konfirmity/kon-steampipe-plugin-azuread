@@ -68,6 +68,8 @@ func TestSignInGraphFilter(t *testing.T) {
 		{"offset renders as UTC", qualMap(timeQual(">=", offset)), []string{"createdDateTime ge 2026-09-20T10:00:00Z"}},
 		{"client app", qualMap(stringQual("client_app_used", "=", "Authenticated SMTP")), []string{"clientAppUsed eq 'Authenticated SMTP'"}},
 		{"client app quote escaped", qualMap(stringQual("client_app_used", "=", "O'Brien")), []string{"clientAppUsed eq 'O''Brien'"}},
+		{"blank client app is still pushed", qualMap(stringQual("client_app_used", "=", "")), []string{"clientAppUsed eq ''"}},
+		{"an infinite bound is left to Postgres", qualMap(timeQual("<=", time.Date(294276, 12, 31, 0, 0, 0, 0, time.UTC)), timeQual(">", time.Date(-4713, 1, 1, 0, 0, 0, 0, time.UTC))), []string{}},
 		{
 			"unsplit IN lists are left to Postgres, never read as the epoch",
 			qualMap(listQual("created_date_time", "="), listQual("client_app_used", "="), timeQual(">=", whole)),
@@ -105,6 +107,7 @@ func TestSignInAdmitsOnlyRowsPostgresKeeps(t *testing.T) {
 		{"< keeps an earlier row", qualMap(timeQual("<", bound)), signIn("a", at(-time.Microsecond), ""), true},
 		{"< drops a row Postgres rounds up onto the bound", qualMap(timeQual("<", bound)), signIn("a", at(-400*time.Nanosecond), ""), false},
 		{"<= keeps a row Postgres rounds down onto the bound", qualMap(timeQual("<=", bound)), signIn("a", at(400*time.Nanosecond), ""), true},
+		{"a half-microsecond tie is kept either way", qualMap(timeQual("<=", bound)), signIn("a", at(500*time.Nanosecond), ""), true},
 		{"<= drops a row past the bound", qualMap(timeQual("<=", bound)), signIn("a", at(2*time.Microsecond), ""), false},
 		{">= drops the extra second Graph returned", qualMap(timeQual(">=", bound.Add(500*time.Millisecond))), signIn("a", at(100*time.Millisecond), ""), false},
 		{"range keeps a row inside it", qualMap(timeQual(">=", bound), timeQual("<", bound.Add(time.Hour))), signIn("a", at(time.Minute), ""), true},

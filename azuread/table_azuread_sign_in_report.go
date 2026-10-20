@@ -111,6 +111,9 @@ func listAdSignInReports(ctx context.Context, d *plugin.QueryData, _ *plugin.Hyd
 
 	result, err := client.AuditLogs().SignIns().Get(ctx, options)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil
+		}
 		errObj := getErrorObject(err)
 		plugin.Logger(ctx).Error("listAdSignInReports", "list_sign_in_report_error", errObj)
 		return nil, errObj
@@ -132,9 +135,8 @@ func listAdSignInReports(ctx context.Context, d *plugin.QueryData, _ *plugin.Hyd
 		if ctx.Err() != nil {
 			return nil, nil
 		}
-		errObj := getErrorObject(err)
-		plugin.Logger(ctx).Error("listAdSignInReports", "paging_error", errObj)
-		return nil, errObj
+		plugin.Logger(ctx).Error("listAdSignInReports", "paging_error", err)
+		return nil, err
 	}
 
 	return nil, nil
@@ -192,8 +194,8 @@ func parseSignInQuals(keyQuals plugin.KeyColumnQualMap) signInQuals {
 	}
 	if keyQuals["client_app_used"] != nil {
 		for _, q := range keyQuals["client_app_used"].Quals {
-			if app := q.Value.GetStringValue(); app != "" {
-				pushed.clientApps = append(pushed.clientApps, app)
+			if q.Value.GetListValue() == nil {
+				pushed.clientApps = append(pushed.clientApps, q.Value.GetStringValue())
 			}
 		}
 	}
@@ -206,6 +208,10 @@ func parseSignInQuals(keyQuals plugin.KeyColumnQualMap) signInQuals {
 func (q signInQuals) graphFilter() []string {
 	filters := []string{}
 	for _, b := range q.created {
+		// An infinite or far-off bound would format as a year Graph rejects; Postgres applies it alone.
+		if b.at.Year() < 1970 || b.at.Year() > 9999 {
+			continue
+		}
 		floor := b.at.Truncate(time.Second)
 		lower := fmt.Sprintf("createdDateTime ge %s", floor.Format(time.RFC3339))
 		upper := fmt.Sprintf("createdDateTime le %s", floor.Add(time.Second).Format(time.RFC3339))
@@ -224,8 +230,9 @@ func (q signInQuals) graphFilter() []string {
 	return filters
 }
 
-// admits reports whether Postgres will keep the sign-in under the pushed quals. The FDW hands
-// Postgres the full 100 ns timestamp as text, which timestamptz input rounds to the microsecond.
+// admits reports whether Postgres may keep the sign-in under the pushed quals. The FDW hands
+// Postgres the full 100 ns timestamp as RFC 3339 text, which timestamptz input rounds to the
+// microsecond; an exact half microsecond may go either way, so both neighbours are tried there.
 func (q signInQuals) admits(signIn models.SignInable) bool {
 	for _, app := range q.clientApps {
 		if got := signIn.GetClientAppUsed(); got == nil || *got != app {
@@ -239,7 +246,13 @@ func (q signInQuals) admits(signIn models.SignInable) bool {
 	if created == nil {
 		return false
 	}
-	at := created.Round(time.Microsecond)
+	if q.createdWithin(created.Round(time.Microsecond)) {
+		return true
+	}
+	return created.Sub(created.Truncate(time.Microsecond)) == 500*time.Nanosecond && q.createdWithin(created.Truncate(time.Microsecond))
+}
+
+func (q signInQuals) createdWithin(at time.Time) bool {
 	for _, b := range q.created {
 		var ok bool
 		switch b.operator {
