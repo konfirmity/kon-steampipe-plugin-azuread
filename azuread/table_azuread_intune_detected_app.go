@@ -83,5 +83,5 @@ func listAdIntuneDetectedApps(ctx context.Context, d *plugin.QueryData, _ *plugi
 		return nil, errObj
 	}
 
-	return nil, nil
+	return nil, listCutShort(ctx, "azuread_intune_detected_app")
 }

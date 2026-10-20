@@ -2,6 +2,7 @@ package azuread
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -57,5 +58,36 @@ func TestIterateDirectoryAuditsKeepsRowsPastFirstPage(t *testing.T) {
 	want := []string{"page1-a", "page2-a", "page2-b"}
 	if fmt.Sprint(ids) != fmt.Sprint(want) {
 		t.Errorf("iterated ids = %v, want %v", ids, want)
+	}
+}
+
+func TestIterateDirectoryAuditsFailsWhenCancelled(t *testing.T) {
+	node, err := jsonserialization.NewJsonParseNode([]byte(`{"value":[{"id":"a"},{"id":"b"}]}`))
+	if err != nil {
+		t.Fatalf("parse node: %v", err)
+	}
+	parsed, err := node.GetObjectValue(models.CreateDirectoryAuditCollectionResponseFromDiscriminatorValue)
+	if err != nil {
+		t.Fatalf("decode page: %v", err)
+	}
+	adapter, err := msgraphsdkgo.NewGraphRequestAdapter(&authentication.AnonymousAuthenticationProvider{})
+	if err != nil {
+		t.Fatalf("adapter: %v", err)
+	}
+	page := parsed.(models.DirectoryAuditCollectionResponseable)
+
+	// emit stops at LIMIT with a live context: a complete result.
+	if err := iterateDirectoryAudits(context.Background(), page, adapter, func(models.DirectoryAuditable) bool { return false }); err != nil {
+		t.Errorf("stopped at limit: err = %v, want nil", err)
+	}
+
+	// emit stops because the query was cancelled (RowsRemaining is 0): a failure.
+	ctx, cancel := context.WithCancel(context.Background())
+	err = iterateDirectoryAudits(ctx, page, adapter, func(models.DirectoryAuditable) bool {
+		cancel()
+		return false
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("cancelled: err = %v, want context.Canceled", err)
 	}
 }

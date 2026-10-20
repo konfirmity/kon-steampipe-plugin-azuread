@@ -105,24 +105,7 @@ func listAdSignInReports(ctx context.Context, d *plugin.QueryData, _ *plugin.Hyd
 		input.Top = Int32(int32(*limit))
 	}
 
-	options := &auditlogs.SignInsRequestBuilderGetRequestConfiguration{
-		QueryParameters: input,
-	}
-
-	result, err := client.AuditLogs().SignIns().Get(ctx, options)
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, nil
-		}
-		errObj := getErrorObject(err)
-		plugin.Logger(ctx).Error("listAdSignInReports", "list_sign_in_report_error", errObj)
-		return nil, errObj
-	}
-
-	fetchPage := func(ctx context.Context, nextLink string) (models.SignInCollectionResponseable, error) {
-		return client.AuditLogs().SignIns().WithUrl(nextLink).Get(ctx, nil)
-	}
-	err = iterateSignInPages(ctx, result, d.WaitForListRateLimit, fetchPage, func(signIn models.SignInable) bool {
+	err = listSignIns(ctx, client.AuditLogs().SignIns(), input, d.WaitForListRateLimit, func(signIn models.SignInable) bool {
 		// Graph matches more than Postgres (whole-second bounds, case-insensitive eq); streamed, those rows would use up a LIMIT before Postgres rejects them.
 		if pushed.admits(signIn) {
 			d.StreamListItem(ctx, &ADSignInReportInfo{signIn})
@@ -132,18 +115,37 @@ func listAdSignInReports(ctx context.Context, d *plugin.QueryData, _ *plugin.Hyd
 		return d.RowsRemaining(ctx) != 0
 	})
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, nil
-		}
-		plugin.Logger(ctx).Error("listAdSignInReports", "paging_error", err)
+		plugin.Logger(ctx).Error("listAdSignInReports", "list_sign_in_report_error", err)
 		return nil, err
 	}
 
 	return nil, nil
 }
 
+// listSignIns fetches the first sign-in page and every next page, passing each sign-in to emit.
+// A query cancelled or timed out at any point, including before the first request (the SDK's
+// limiter wait returns early on cancellation), returns an error rather than a short list.
+func listSignIns(ctx context.Context, signIns *auditlogs.SignInsRequestBuilder, input *auditlogs.SignInsRequestBuilderGetQueryParameters, wait func(context.Context), emit func(models.SignInable) bool) error {
+	if err := listCutShort(ctx, "azuread_sign_in_report"); err != nil {
+		return err
+	}
+	first, err := signIns.Get(ctx, &auditlogs.SignInsRequestBuilderGetRequestConfiguration{QueryParameters: input})
+	if err != nil {
+		if cutShort := listCutShort(ctx, "azuread_sign_in_report"); cutShort != nil {
+			return cutShort
+		}
+		return getErrorObject(err)
+	}
+
+	fetchPage := func(ctx context.Context, nextLink string) (models.SignInCollectionResponseable, error) {
+		return signIns.WithUrl(nextLink).Get(ctx, nil)
+	}
+	return iterateSignInPages(ctx, first, wait, fetchPage, emit)
+}
+
 // iterateSignInPages calls emit for each sign-in on the first page and on every @odata.nextLink
 // page, calling wait before each next-page fetch so every request is paced, not just the first.
+// It returns nil only when the last page is done or emit stops with the context live (LIMIT met).
 func iterateSignInPages(ctx context.Context, page models.SignInCollectionResponseable, wait func(context.Context), fetchPage func(context.Context, string) (models.SignInCollectionResponseable, error), emit func(models.SignInable) bool) error {
 	for page != nil {
 		for _, signIn := range page.GetValue() {
@@ -151,7 +153,7 @@ func iterateSignInPages(ctx context.Context, page models.SignInCollectionRespons
 				continue
 			}
 			if !emit(signIn) {
-				return nil
+				return listCutShort(ctx, "azuread_sign_in_report")
 			}
 		}
 		nextLink := page.GetOdataNextLink()
@@ -159,11 +161,14 @@ func iterateSignInPages(ctx context.Context, page models.SignInCollectionRespons
 			return nil
 		}
 		wait(ctx)
-		if ctx.Err() != nil {
-			return nil
+		if err := listCutShort(ctx, "azuread_sign_in_report"); err != nil {
+			return err
 		}
 		var err error
 		if page, err = fetchPage(ctx, *nextLink); err != nil {
+			if cutShort := listCutShort(ctx, "azuread_sign_in_report"); cutShort != nil {
+				return cutShort
+			}
 			return err
 		}
 	}

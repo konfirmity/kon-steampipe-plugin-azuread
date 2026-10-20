@@ -52,7 +52,7 @@ func listAdSubscribedSkus(ctx context.Context, d *plugin.QueryData, _ *plugin.Hy
 		d.StreamListItem(ctx, &ADSubscribedSkuInfo{sku})
 
 		if d.RowsRemaining(ctx) == 0 {
-			return nil, nil
+			return nil, listCutShort(ctx, "azuread_subscribed_sku")
 		}
 	}
 

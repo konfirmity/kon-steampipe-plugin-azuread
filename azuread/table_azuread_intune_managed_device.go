@@ -103,7 +103,7 @@ func listAdIntuneManagedDevices(ctx context.Context, d *plugin.QueryData, _ *plu
 		return nil, err
 	}
 
-	return nil, nil
+	return nil, listCutShort(ctx, "azuread_intune_managed_device")
 }
 
 //// HYDRATE FUNCTIONS

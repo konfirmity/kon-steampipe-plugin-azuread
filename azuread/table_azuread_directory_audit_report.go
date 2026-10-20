@@ -162,13 +162,18 @@ func iterateDirectoryAudits(ctx context.Context, firstPage models.DirectoryAudit
 		return err
 	}
 
-	return pageIterator.Iterate(ctx, func(pageItem interface{}) bool {
+	err = pageIterator.Iterate(ctx, func(pageItem interface{}) bool {
 		directoryAudit, ok := pageItem.(models.DirectoryAuditable)
 		if !ok {
 			return true
 		}
 		return emit(directoryAudit)
 	})
+	if err != nil {
+		return err
+	}
+	// Iterate returns nil when emit stops, which a cancelled query does too.
+	return listCutShort(ctx, "azuread_directory_audit_report")
 }
 
 //// HYDRATE FUNCTIONS

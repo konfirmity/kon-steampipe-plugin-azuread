@@ -3,6 +3,7 @@ package azuread
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	betaodataerrors "github.com/microsoftgraph/msgraph-beta-sdk-go/models/odataerrors"
@@ -67,4 +68,15 @@ func isIgnorableErrorPredicate(ignoreErrorCodes []string) plugin.ErrorPredicateW
 		}
 		return false
 	}
+}
+
+// listCutShort is the error for a list hydrate that stopped because its query was cancelled or
+// timed out, and nil while the context is live (a list that stopped at LIMIT). A list that stops
+// early and returns nil reads as a complete result, so a check sees "no rows" where it should see
+// a failure.
+func listCutShort(ctx context.Context, table string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%s: list stopped before it was complete: %w", table, err)
+	}
+	return nil
 }

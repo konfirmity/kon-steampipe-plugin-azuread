@@ -216,8 +216,8 @@ func TestIterateSignInPagesStops(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := iterateSignInPages(ctx, first, noWait, failing, func(models.SignInable) bool { return true }); err != nil || fetches != 0 {
-		t.Errorf("a cancelled query must stop quietly after the wait: err=%v fetches=%d", err, fetches)
+	if err := iterateSignInPages(ctx, first, noWait, failing, func(models.SignInable) bool { return true }); !errors.Is(err, context.Canceled) || fetches != 0 {
+		t.Errorf("a cancelled query must fail after the wait, without fetching: err=%v fetches=%d", err, fetches)
 	}
 
 	if err := iterateSignInPages(context.Background(), first, noWait, failing, func(models.SignInable) bool { return true }); err == nil || err.Error() != "throttled" {

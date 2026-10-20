@@ -76,7 +76,7 @@ func listAdSecureScoreControlScores(ctx context.Context, d *plugin.QueryData, _ 
 		d.StreamListItem(ctx, info)
 
 		if d.RowsRemaining(ctx) == 0 {
-			return nil, nil
+			return nil, listCutShort(ctx, "azuread_secure_score_control_score")
 		}
 	}
 

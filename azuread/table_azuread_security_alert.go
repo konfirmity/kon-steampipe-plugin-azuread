@@ -115,7 +115,7 @@ func listAdSecurityAlerts(ctx context.Context, d *plugin.QueryData, _ *plugin.Hy
 		return nil, err
 	}
 
-	return nil, nil
+	return nil, listCutShort(ctx, "azuread_security_alert")
 }
 
 //// HYDRATE FUNCTIONS
