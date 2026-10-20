@@ -11,6 +11,10 @@ Azure Active Directory (Azure AD) is Microsoft's cloud-based identity and access
 
 The `azuread_sign_in_report` table provides insights into sign-in activities within Microsoft's Azure Active Directory. As a security analyst, explore sign-in specific details through this table, including the location, device, and application used for sign-in. Utilize it to uncover information about sign-in activities, such as failed sign-ins, sign-ins from risky locations or devices, and the verification of user identities.
 
+**Important Notes**
+
+- Graph lists the whole sign-in log by default, which can time out on a busy tenant. A `created_date_time` range (`>`, `>=`, `=`, `<`, `<=`) and `client_app_used =` are sent to Graph as `$filter`, so only matching sign-ins are paged. A `client_app_used in (...)` list, when it is the query's only `in` list on a key column, runs one Graph call per value. Every sign-in list page is paced to Graph's limit of five report requests per 10 seconds.
+
 ## Examples
 
 ### Basic info
@@ -65,4 +69,33 @@ from
   azuread_sign_in_report
 where
   user_principal_name = 'abc@myacc.onmicrosoft.com';
+```
+
+### List successful IMAP, POP and SMTP AUTH sign-ins in the last 30 days
+Find users still signing in with these basic-authentication protocols, which bypass MFA. The time window and client apps are filtered by Microsoft Graph, so the query reads only those sign-ins.
+
+```sql+postgres
+select
+  user_principal_name,
+  client_app_used,
+  created_date_time
+from
+  azuread_sign_in_report
+where
+  created_date_time >= now() - interval '30 days'
+  and client_app_used in ('Authenticated SMTP', 'IMAP4', 'POP3')
+  and (status ->> 'errorCode')::int = 0;
+```
+
+```sql+sqlite
+select
+  user_principal_name,
+  client_app_used,
+  created_date_time
+from
+  azuread_sign_in_report
+where
+  created_date_time >= datetime('now', '-30 days')
+  and client_app_used in ('Authenticated SMTP', 'IMAP4', 'POP3')
+  and json_extract(status, '$.errorCode') = 0;
 ```
