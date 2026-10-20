@@ -13,7 +13,19 @@ import (
 	"github.com/turbot/steampipe-plugin-sdk/v5/grpc/proto"
 	"github.com/turbot/steampipe-plugin-sdk/v5/plugin"
 	"github.com/turbot/steampipe-plugin-sdk/v5/plugin/transform"
+	"github.com/turbot/steampipe-plugin-sdk/v5/rate_limiter"
 )
+
+// signInReportListLimiter keeps sign-in list calls within Graph's identity and access reports
+// limit of five requests per 10 seconds per tenant: the SDK runs an IN list on client_app_used as
+// one concurrent list call per value.
+var signInReportListLimiter = &rate_limiter.Definition{
+	Name:       "azuread_sign_in_report_list",
+	FillRate:   0.5,
+	BucketSize: 5,
+	Scope:      []string{rate_limiter.RateLimiterScopeConnection, "service", "action"},
+	Where:      "service = 'auditLogs' and action = 'signIns.list'",
+}
 
 //// TABLE DEFINITION
 
@@ -30,6 +42,7 @@ func tableAzureAdSignInReport(_ context.Context) *plugin.Table {
 		},
 		List: &plugin.ListConfig{
 			Hydrate: listAdSignInReports,
+			Tags:    map[string]string{"service": "auditLogs", "action": "signIns.list"},
 			KeyColumns: plugin.KeyColumnSlice{
 				{Name: "created_date_time", Require: plugin.Optional, Operators: []string{">", ">=", "=", "<", "<="}},
 				{Name: "client_app_used", Require: plugin.Optional},
@@ -135,38 +148,34 @@ func listAdSignInReports(ctx context.Context, d *plugin.QueryData, _ *plugin.Hyd
 
 // buildSignInReportQueryFilter renders the pushed-down quals as an OData $filter, so Graph pages
 // through only the matching sign-ins instead of the whole log. Graph filters createdDateTime with
-// eq, le and ge only, and compares to the second, so every bound is widened to whole seconds and
-// strict operators become inclusive ones; Postgres rechecks the quals on the returned rows.
+// eq, le and ge only, and keeps sub-second precision Postgres rounds away, so each bound is widened
+// to whole seconds on the safe side and strict operators become inclusive; Postgres rechecks the
+// quals on the returned rows. A list value (an IN the SDK did not split) is left to Postgres.
 func buildSignInReportQueryFilter(keyQuals plugin.KeyColumnQualMap) []string {
 	filters := []string{}
 
 	if keyQuals["created_date_time"] != nil {
 		for _, q := range keyQuals["created_date_time"].Quals {
-			givenTime := q.Value.GetTimestampValue().AsTime().UTC()
-			floor := givenTime.Truncate(time.Second)
-			ceil := floor
-			if ceil.Before(givenTime) {
-				ceil = ceil.Add(time.Second)
+			ts := q.Value.GetTimestampValue()
+			if ts == nil {
+				continue
 			}
+			floor := ts.AsTime().UTC().Truncate(time.Second)
+			lower := fmt.Sprintf("createdDateTime ge %s", floor.Format(time.RFC3339))
+			upper := fmt.Sprintf("createdDateTime le %s", floor.Add(time.Second).Format(time.RFC3339))
 			switch q.Operator {
 			case ">", ">=":
-				filters = append(filters, fmt.Sprintf("createdDateTime ge %s", floor.Format(time.RFC3339)))
+				filters = append(filters, lower)
 			case "<", "<=":
-				filters = append(filters, fmt.Sprintf("createdDateTime le %s", ceil.Format(time.RFC3339)))
+				filters = append(filters, upper)
 			case "=":
-				filters = append(filters,
-					fmt.Sprintf("createdDateTime ge %s", floor.Format(time.RFC3339)),
-					fmt.Sprintf("createdDateTime le %s", ceil.Format(time.RFC3339)))
+				filters = append(filters, lower, upper)
 			}
 		}
 	}
 
-	// An IN list reaches here one value at a time: the SDK makes a list call per value.
 	if keyQuals["client_app_used"] != nil {
 		for _, q := range keyQuals["client_app_used"].Quals {
-			if q.Operator != "=" {
-				continue
-			}
 			if app := q.Value.GetStringValue(); app != "" {
 				filters = append(filters, fmt.Sprintf("clientAppUsed eq '%s'", strings.ReplaceAll(app, "'", "''")))
 			}
