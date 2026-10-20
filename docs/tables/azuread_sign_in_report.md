@@ -13,7 +13,7 @@ The `azuread_sign_in_report` table provides insights into sign-in activities wit
 
 **Important Notes**
 
-- Graph lists the whole sign-in log by default, which can time out on a busy tenant. A `created_date_time` range (`>`, `>=`, `=`, `<`, `<=`) and `client_app_used =` are sent to Graph as `$filter`, so only matching sign-ins are paged. A `client_app_used in (...)` list, when it is the query's only `in` list on a key column, runs one Graph call per value. Every sign-in request is paced to Graph's limit of five report requests per 10 seconds.
+- Graph lists the whole sign-in log by default, which can time out on a busy tenant. A `created_date_time` range (`>`, `>=`, `=`, `<`, `<=`) and `client_app_used =` are sent to Graph as `$filter`, so only matching sign-ins are paged. A `client_app_used in (...)` list, when it is the query's only `in` list on a key column, runs one Graph call per value. Every sign-in list page is paced to Graph's limit of five report requests per 10 seconds.
 
 ## Examples
 

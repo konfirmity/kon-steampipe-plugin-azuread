@@ -96,19 +96,13 @@ func listAdSignInReports(ctx context.Context, d *plugin.QueryData, _ *plugin.Hyd
 		Top: Int32(999),
 	}
 
-	// Restrict the limit value to be passed in the query parameter which is not between 1 and 999, otherwise API will throw an error as follow
-	// unexpected status 400 with OData error: Request_UnsupportedQuery: Invalid page size specified: '1000'. Must be between 1 and 999 inclusive.
-	limit := d.QueryContext.Limit
-	if limit != nil {
-		if *limit > 0 && *limit < 999 {
-			l := int32(*limit)
-			input.Top = Int32(l)
-		}
-	}
-
-	if filter := buildSignInReportQueryFilter(d.Quals); len(filter) > 0 {
+	pushed := parseSignInQuals(d.Quals)
+	if filter := pushed.graphFilter(); len(filter) > 0 {
 		joined := strings.Join(filter, " and ")
 		input.Filter = &joined
+	} else if limit := d.QueryContext.Limit; limit != nil && *limit > 0 && *limit < 999 {
+		// Shrunk only without a $filter: a filtered page can hold rows admits drops, which a short page would spend a paced request on.
+		input.Top = Int32(int32(*limit))
 	}
 
 	options := &auditlogs.SignInsRequestBuilderGetRequestConfiguration{
@@ -122,13 +116,12 @@ func listAdSignInReports(ctx context.Context, d *plugin.QueryData, _ *plugin.Hyd
 		return nil, errObj
 	}
 
-	nextPage := func(ctx context.Context, nextLink string) (models.SignInCollectionResponseable, error) {
-		d.WaitForListRateLimit(ctx)
+	fetchPage := func(ctx context.Context, nextLink string) (models.SignInCollectionResponseable, error) {
 		return client.AuditLogs().SignIns().WithUrl(nextLink).Get(ctx, nil)
 	}
-	err = iterateSignInPages(ctx, result, nextPage, func(signIn models.SignInable) bool {
-		// The $filter bounds are whole seconds, so drop the rows only that widening let in: streamed, they would use up a LIMIT before Postgres rejects them.
-		if matchesCreatedDateTimeQuals(signIn.GetCreatedDateTime(), d.Quals) {
+	err = iterateSignInPages(ctx, result, d.WaitForListRateLimit, fetchPage, func(signIn models.SignInable) bool {
+		// Graph matches more than Postgres (whole-second bounds, case-insensitive eq); streamed, those rows would use up a LIMIT before Postgres rejects them.
+		if pushed.admits(signIn) {
 			d.StreamListItem(ctx, &ADSignInReportInfo{signIn})
 		}
 
@@ -136,6 +129,9 @@ func listAdSignInReports(ctx context.Context, d *plugin.QueryData, _ *plugin.Hyd
 		return d.RowsRemaining(ctx) != 0
 	})
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil
+		}
 		errObj := getErrorObject(err)
 		plugin.Logger(ctx).Error("listAdSignInReports", "paging_error", errObj)
 		return nil, errObj
@@ -145,10 +141,13 @@ func listAdSignInReports(ctx context.Context, d *plugin.QueryData, _ *plugin.Hyd
 }
 
 // iterateSignInPages calls emit for each sign-in on the first page and on every @odata.nextLink
-// page, fetching each next page through nextPage so the caller can pace it.
-func iterateSignInPages(ctx context.Context, page models.SignInCollectionResponseable, nextPage func(context.Context, string) (models.SignInCollectionResponseable, error), emit func(models.SignInable) bool) error {
+// page, calling wait before each next-page fetch so every request is paced, not just the first.
+func iterateSignInPages(ctx context.Context, page models.SignInCollectionResponseable, wait func(context.Context), fetchPage func(context.Context, string) (models.SignInCollectionResponseable, error), emit func(models.SignInable) bool) error {
 	for page != nil {
 		for _, signIn := range page.GetValue() {
+			if signIn == nil {
+				continue
+			}
 			if !emit(signIn) {
 				return nil
 			}
@@ -157,92 +156,111 @@ func iterateSignInPages(ctx context.Context, page models.SignInCollectionRespons
 		if nextLink == nil || *nextLink == "" {
 			return nil
 		}
+		wait(ctx)
+		if ctx.Err() != nil {
+			return nil
+		}
 		var err error
-		if page, err = nextPage(ctx, *nextLink); err != nil {
+		if page, err = fetchPage(ctx, *nextLink); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// matchesCreatedDateTimeQuals reports whether Postgres could accept the sign-in's created_date_time
-// under the created_date_time quals. Graph keeps 100 ns precision and Postgres microseconds, so it
-// passes if either truncating or rounding to the microsecond satisfies every qual.
-func matchesCreatedDateTimeQuals(created *time.Time, keyQuals plugin.KeyColumnQualMap) bool {
-	if keyQuals["created_date_time"] == nil {
-		return true
-	}
-	if created == nil {
-		return false
-	}
-	satisfies := func(at time.Time) bool {
-		for _, q := range keyQuals["created_date_time"].Quals {
-			ts := q.Value.GetTimestampValue()
-			if ts == nil {
-				continue
-			}
-			bound := ts.AsTime()
-			var ok bool
-			switch q.Operator {
-			case ">":
-				ok = at.After(bound)
-			case ">=":
-				ok = !at.Before(bound)
-			case "=":
-				ok = at.Equal(bound)
-			case "<=":
-				ok = !at.After(bound)
-			case "<":
-				ok = at.Before(bound)
-			default:
-				ok = true
-			}
-			if !ok {
-				return false
-			}
-		}
-		return true
-	}
-	return satisfies(created.Truncate(time.Microsecond)) || satisfies(created.Round(time.Microsecond))
+type timeBound struct {
+	operator string
+	at       time.Time
 }
 
-// buildSignInReportQueryFilter renders the pushed-down quals as an OData $filter, so Graph pages
-// through only the matching sign-ins instead of the whole log. Graph filters createdDateTime with
-// eq, le and ge only, and keeps sub-second precision Postgres rounds away, so each bound is widened
-// to whole seconds on the safe side and strict operators become inclusive; Postgres rechecks the
-// quals on the returned rows. A list value (an IN the SDK did not split) is left to Postgres.
-func buildSignInReportQueryFilter(keyQuals plugin.KeyColumnQualMap) []string {
-	filters := []string{}
+// signInQuals holds the quals this table sends to Graph, parsed once per list call.
+type signInQuals struct {
+	created    []timeBound
+	clientApps []string
+}
 
+// parseSignInQuals reads the created_date_time and client_app_used quals. A list value (an IN the
+// SDK did not split) is skipped and left to Postgres.
+func parseSignInQuals(keyQuals plugin.KeyColumnQualMap) signInQuals {
+	var pushed signInQuals
 	if keyQuals["created_date_time"] != nil {
 		for _, q := range keyQuals["created_date_time"].Quals {
-			ts := q.Value.GetTimestampValue()
-			if ts == nil {
-				continue
-			}
-			floor := ts.AsTime().UTC().Truncate(time.Second)
-			lower := fmt.Sprintf("createdDateTime ge %s", floor.Format(time.RFC3339))
-			upper := fmt.Sprintf("createdDateTime le %s", floor.Add(time.Second).Format(time.RFC3339))
-			switch q.Operator {
-			case ">", ">=":
-				filters = append(filters, lower)
-			case "<", "<=":
-				filters = append(filters, upper)
-			case "=":
-				filters = append(filters, lower, upper)
+			if ts := q.Value.GetTimestampValue(); ts != nil {
+				pushed.created = append(pushed.created, timeBound{q.Operator, ts.AsTime().UTC()})
 			}
 		}
 	}
-
 	if keyQuals["client_app_used"] != nil {
 		for _, q := range keyQuals["client_app_used"].Quals {
 			if app := q.Value.GetStringValue(); app != "" {
-				filters = append(filters, fmt.Sprintf("clientAppUsed eq '%s'", strings.ReplaceAll(app, "'", "''")))
+				pushed.clientApps = append(pushed.clientApps, app)
 			}
 		}
 	}
+	return pushed
+}
 
+// graphFilter renders the quals as OData $filter terms, so Graph pages through only the matching
+// sign-ins instead of the whole log. Graph filters createdDateTime with eq, le and ge only, in whole
+// seconds, so each bound is widened to the second outside it and strict operators become inclusive.
+func (q signInQuals) graphFilter() []string {
+	filters := []string{}
+	for _, b := range q.created {
+		floor := b.at.Truncate(time.Second)
+		lower := fmt.Sprintf("createdDateTime ge %s", floor.Format(time.RFC3339))
+		upper := fmt.Sprintf("createdDateTime le %s", floor.Add(time.Second).Format(time.RFC3339))
+		switch b.operator {
+		case ">", ">=":
+			filters = append(filters, lower)
+		case "<", "<=":
+			filters = append(filters, upper)
+		case "=":
+			filters = append(filters, lower, upper)
+		}
+	}
+	for _, app := range q.clientApps {
+		filters = append(filters, fmt.Sprintf("clientAppUsed eq '%s'", strings.ReplaceAll(app, "'", "''")))
+	}
 	return filters
+}
+
+// admits reports whether Postgres will keep the sign-in under the pushed quals. The FDW hands
+// Postgres the full 100 ns timestamp as text, which timestamptz input rounds to the microsecond.
+func (q signInQuals) admits(signIn models.SignInable) bool {
+	for _, app := range q.clientApps {
+		if got := signIn.GetClientAppUsed(); got == nil || *got != app {
+			return false
+		}
+	}
+	if len(q.created) == 0 {
+		return true
+	}
+	created := signIn.GetCreatedDateTime()
+	if created == nil {
+		return false
+	}
+	at := created.Round(time.Microsecond)
+	for _, b := range q.created {
+		var ok bool
+		switch b.operator {
+		case ">":
+			ok = at.After(b.at)
+		case ">=":
+			ok = !at.Before(b.at)
+		case "=":
+			ok = at.Equal(b.at)
+		case "<=":
+			ok = !at.After(b.at)
+		case "<":
+			ok = at.Before(b.at)
+		default:
+			ok = true
+		}
+		if !ok {
+			return false
+		}
+	}
+	return true
 }
 
 //// HYDRATE FUNCTIONS

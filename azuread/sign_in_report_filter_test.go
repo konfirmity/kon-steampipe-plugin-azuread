@@ -37,7 +37,17 @@ func qualMap(qs ...*quals.Qual) plugin.KeyColumnQualMap {
 	return m
 }
 
-func TestBuildSignInReportQueryFilter(t *testing.T) {
+func signIn(id string, created *time.Time, clientApp string) models.SignInable {
+	s := models.NewSignIn()
+	s.SetId(&id)
+	s.SetCreatedDateTime(created)
+	if clientApp != "" {
+		s.SetClientAppUsed(&clientApp)
+	}
+	return s
+}
+
+func TestSignInGraphFilter(t *testing.T) {
 	whole := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
 	fractional := time.Date(2026, 9, 20, 10, 0, 0, 500_000_000, time.UTC)
 	offset := time.Date(2026, 9, 20, 15, 30, 0, 0, time.FixedZone("IST", 5*3600+1800))
@@ -72,9 +82,43 @@ func TestBuildSignInReportQueryFilter(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildSignInReportQueryFilter(tc.quals)
+			got := parseSignInQuals(tc.quals).graphFilter()
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("filter = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSignInAdmitsOnlyRowsPostgresKeeps(t *testing.T) {
+	bound := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) *time.Time { v := bound.Add(d); return &v }
+
+	cases := []struct {
+		name  string
+		quals plugin.KeyColumnQualMap
+		row   models.SignInable
+		want  bool
+	}{
+		{"no quals keeps a row without a time", qualMap(), signIn("a", nil, ""), true},
+		{"< drops the extra second Graph returned", qualMap(timeQual("<", bound)), signIn("a", at(400*time.Millisecond), ""), false},
+		{"< keeps an earlier row", qualMap(timeQual("<", bound)), signIn("a", at(-time.Microsecond), ""), true},
+		{"< drops a row Postgres rounds up onto the bound", qualMap(timeQual("<", bound)), signIn("a", at(-400*time.Nanosecond), ""), false},
+		{"<= keeps a row Postgres rounds down onto the bound", qualMap(timeQual("<=", bound)), signIn("a", at(400*time.Nanosecond), ""), true},
+		{"<= drops a row past the bound", qualMap(timeQual("<=", bound)), signIn("a", at(2*time.Microsecond), ""), false},
+		{">= drops the extra second Graph returned", qualMap(timeQual(">=", bound.Add(500*time.Millisecond))), signIn("a", at(100*time.Millisecond), ""), false},
+		{"range keeps a row inside it", qualMap(timeQual(">=", bound), timeQual("<", bound.Add(time.Hour))), signIn("a", at(time.Minute), ""), true},
+		{"a time qual drops a row without a time", qualMap(timeQual(">=", bound)), signIn("a", nil, ""), false},
+		{"an unsplit list qual is left to Postgres", qualMap(listQual("created_date_time", "=")), signIn("a", at(time.Hour), ""), true},
+		{"client app matches exactly", qualMap(stringQual("client_app_used", "=", "IMAP4")), signIn("a", nil, "IMAP4"), true},
+		{"Graph's case-insensitive match is dropped", qualMap(stringQual("client_app_used", "=", "imap4")), signIn("a", nil, "IMAP4"), false},
+		{"a client app qual drops a row without one", qualMap(stringQual("client_app_used", "=", "IMAP4")), signIn("a", nil, ""), false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseSignInQuals(tc.quals).admits(tc.row); got != tc.want {
+				t.Errorf("admits = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -110,69 +154,36 @@ func TestSignInReportListLimiterTargetsOnlySignInLists(t *testing.T) {
 	if !limiter.SatisfiesFilters(tags) {
 		t.Errorf("limiter does not match the sign-in list call's tags %v", tags)
 	}
+	if limiter.SatisfiesFilters(map[string]string{"service": "auditLogs", "action": "directoryAudits.list"}) {
+		t.Error("limiter must not throttle other audit-log tables")
+	}
 	if !slices.Contains(Plugin(context.Background()).RateLimiters, limiter) {
 		t.Error("plugin does not register the sign-in list limiter")
 	}
 }
 
-func TestMatchesCreatedDateTimeQualsDropsOnlyWideningRows(t *testing.T) {
-	bound := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
-	at := func(d time.Duration) *time.Time { v := bound.Add(d); return &v }
-
-	cases := []struct {
-		name    string
-		quals   plugin.KeyColumnQualMap
-		created *time.Time
-		want    bool
-	}{
-		{"no time quals keeps everything", qualMap(stringQual("client_app_used", "=", "IMAP4")), nil, true},
-		{"< drops the extra second Graph returned", qualMap(timeQual("<", bound)), at(400 * time.Millisecond), false},
-		{"< keeps an earlier row", qualMap(timeQual("<", bound)), at(-time.Microsecond), true},
-		{"<= keeps a row Postgres rounds onto the bound", qualMap(timeQual("<=", bound)), at(400 * time.Nanosecond), true},
-		{"<= drops a row past the bound", qualMap(timeQual("<=", bound)), at(2 * time.Microsecond), false},
-		{"= keeps a row Postgres rounds onto the bound", qualMap(timeQual("=", bound)), at(-400 * time.Nanosecond), true},
-		{">= drops the extra second Graph returned", qualMap(timeQual(">=", bound.Add(500*time.Millisecond))), at(100 * time.Millisecond), false},
-		{"range keeps a row inside it", qualMap(timeQual(">=", bound), timeQual("<", bound.Add(time.Hour))), at(time.Minute), true},
-		{"a time qual drops a row without a time", qualMap(timeQual(">=", bound)), nil, false},
-		{"an unsplit list qual is left to Postgres", qualMap(listQual("created_date_time", "=")), at(time.Hour), true},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := matchesCreatedDateTimeQuals(tc.created, tc.quals); got != tc.want {
-				t.Errorf("matches = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-func signInPage(nextLink string, ids ...string) models.SignInCollectionResponseable {
+func signInPage(nextLink string, rows ...models.SignInable) models.SignInCollectionResponseable {
 	page := models.NewSignInCollectionResponse()
-	var value []models.SignInable
-	for _, id := range ids {
-		signIn := models.NewSignIn()
-		signIn.SetId(&id)
-		value = append(value, signIn)
-	}
-	page.SetValue(value)
+	page.SetValue(rows)
 	if nextLink != "" {
 		page.SetOdataNextLink(&nextLink)
 	}
 	return page
 }
 
-func TestIterateSignInPagesFetchesEachNextLinkThroughNextPage(t *testing.T) {
+func TestIterateSignInPagesWaitsBeforeEveryNextPage(t *testing.T) {
 	pages := map[string]models.SignInCollectionResponseable{
-		"page2": signInPage("page3", "b", "c"),
-		"page3": signInPage("", "d"),
+		"page2": signInPage("page3", signIn("b", nil, ""), nil, signIn("c", nil, "")),
+		"page3": signInPage("", signIn("d", nil, "")),
 	}
-	var fetched, ids []string
-	nextPage := func(_ context.Context, link string) (models.SignInCollectionResponseable, error) {
-		fetched = append(fetched, link)
+	var events, ids []string
+	wait := func(context.Context) { events = append(events, "wait") }
+	fetchPage := func(_ context.Context, link string) (models.SignInCollectionResponseable, error) {
+		events = append(events, link)
 		return pages[link], nil
 	}
 
-	err := iterateSignInPages(context.Background(), signInPage("page2", "a"), nextPage, func(s models.SignInable) bool {
+	err := iterateSignInPages(context.Background(), signInPage("page2", signIn("a", nil, "")), wait, fetchPage, func(s models.SignInable) bool {
 		ids = append(ids, *s.GetId())
 		return true
 	})
@@ -180,27 +191,33 @@ func TestIterateSignInPagesFetchesEachNextLinkThroughNextPage(t *testing.T) {
 		t.Fatalf("iterate: %v", err)
 	}
 	if !slices.Equal(ids, []string{"a", "b", "c", "d"}) {
-		t.Errorf("ids = %v", ids)
+		t.Errorf("ids = %v (a null entry must be skipped)", ids)
 	}
-	if !slices.Equal(fetched, []string{"page2", "page3"}) {
-		t.Errorf("fetched = %v", fetched)
+	if !slices.Equal(events, []string{"wait", "page2", "wait", "page3"}) {
+		t.Errorf("events = %v, want a wait before each fetch", events)
 	}
 }
 
-func TestIterateSignInPagesStopsWhenEmitStopsOrAPageFails(t *testing.T) {
+func TestIterateSignInPagesStops(t *testing.T) {
 	fetches := 0
-	nextPage := func(context.Context, string) (models.SignInCollectionResponseable, error) {
+	noWait := func(context.Context) {}
+	failing := func(context.Context, string) (models.SignInCollectionResponseable, error) {
 		fetches++
 		return nil, errors.New("throttled")
 	}
+	first := signInPage("page2", signIn("a", nil, ""))
 
-	err := iterateSignInPages(context.Background(), signInPage("page2", "a", "b"), nextPage, func(models.SignInable) bool { return false })
-	if err != nil || fetches != 0 {
+	if err := iterateSignInPages(context.Background(), first, noWait, failing, func(models.SignInable) bool { return false }); err != nil || fetches != 0 {
 		t.Errorf("a stopped emit must not fetch: err=%v fetches=%d", err, fetches)
 	}
 
-	err = iterateSignInPages(context.Background(), signInPage("page2", "a"), nextPage, func(models.SignInable) bool { return true })
-	if err == nil || err.Error() != "throttled" {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := iterateSignInPages(ctx, first, noWait, failing, func(models.SignInable) bool { return true }); err != nil || fetches != 0 {
+		t.Errorf("a cancelled query must stop quietly after the wait: err=%v fetches=%d", err, fetches)
+	}
+
+	if err := iterateSignInPages(context.Background(), first, noWait, failing, func(models.SignInable) bool { return true }); err == nil || err.Error() != "throttled" {
 		t.Errorf("err = %v, want the page error", err)
 	}
 }
