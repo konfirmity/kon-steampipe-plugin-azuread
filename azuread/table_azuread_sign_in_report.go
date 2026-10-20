@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	msgraphcore "github.com/microsoftgraph/msgraph-sdk-go-core"
 	"github.com/microsoftgraph/msgraph-sdk-go/auditlogs"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 
@@ -16,14 +15,14 @@ import (
 	"github.com/turbot/steampipe-plugin-sdk/v5/rate_limiter"
 )
 
-// signInReportListLimiter keeps sign-in list calls within Graph's identity and access reports
-// limit of five requests per 10 seconds per tenant: the SDK runs an IN list on client_app_used as
-// one concurrent list call per value.
+// signInReportListLimiter keeps sign-in list requests, every page included, within Graph's
+// identity and access reports limit of five requests per 10 seconds per tenant: the SDK runs an IN
+// list on client_app_used as one concurrent list call per value.
 var signInReportListLimiter = &rate_limiter.Definition{
 	Name:       "azuread_sign_in_report_list",
 	FillRate:   0.5,
 	BucketSize: 5,
-	Scope:      []string{rate_limiter.RateLimiterScopeConnection, "service", "action"},
+	Scope:      []string{rate_limiter.RateLimiterScopeConnection},
 	Where:      "service = 'auditLogs' and action = 'signIns.list'",
 }
 
@@ -86,7 +85,7 @@ func tableAzureAdSignInReport(_ context.Context) *plugin.Table {
 
 func listAdSignInReports(ctx context.Context, d *plugin.QueryData, _ *plugin.HydrateData) (interface{}, error) {
 	// Create client
-	client, adapter, err := GetGraphClient(ctx, d)
+	client, _, err := GetGraphClient(ctx, d)
 	if err != nil {
 		plugin.Logger(ctx).Error("azuread_sign_in_report.listAdSignInReports", "connection_error", err)
 		return nil, err
@@ -123,15 +122,13 @@ func listAdSignInReports(ctx context.Context, d *plugin.QueryData, _ *plugin.Hyd
 		return nil, errObj
 	}
 
-	pageIterator, err := msgraphcore.NewPageIterator[interface{}](result, adapter, models.CreateSignInCollectionResponseFromDiscriminatorValue)
-	if err != nil {
-		plugin.Logger(ctx).Error("listAdSignInReports", "create_iterator_instance_error", err)
-		return nil, err
+	nextPage := func(ctx context.Context, nextLink string) (models.SignInCollectionResponseable, error) {
+		d.WaitForListRateLimit(ctx)
+		return client.AuditLogs().SignIns().WithUrl(nextLink).Get(ctx, nil)
 	}
-
-	err = pageIterator.Iterate(ctx, func(pageItem interface{}) bool {
-		// To prevent errors during type conversion caused by inconsistent API responses (especially with larger data sets), we may get the different type of response (models.DirectoryAuditable), we need to include the following check.
-		if signIn, ok := pageItem.(models.SignInable); ok {
+	err = iterateSignInPages(ctx, result, nextPage, func(signIn models.SignInable) bool {
+		// The $filter bounds are whole seconds, so drop the rows only that widening let in: streamed, they would use up a LIMIT before Postgres rejects them.
+		if matchesCreatedDateTimeQuals(signIn.GetCreatedDateTime(), d.Quals) {
 			d.StreamListItem(ctx, &ADSignInReportInfo{signIn})
 		}
 
@@ -139,11 +136,74 @@ func listAdSignInReports(ctx context.Context, d *plugin.QueryData, _ *plugin.Hyd
 		return d.RowsRemaining(ctx) != 0
 	})
 	if err != nil {
-		plugin.Logger(ctx).Error("listAdSignInReports", "paging_error", err)
-		return nil, err
+		errObj := getErrorObject(err)
+		plugin.Logger(ctx).Error("listAdSignInReports", "paging_error", errObj)
+		return nil, errObj
 	}
 
 	return nil, nil
+}
+
+// iterateSignInPages calls emit for each sign-in on the first page and on every @odata.nextLink
+// page, fetching each next page through nextPage so the caller can pace it.
+func iterateSignInPages(ctx context.Context, page models.SignInCollectionResponseable, nextPage func(context.Context, string) (models.SignInCollectionResponseable, error), emit func(models.SignInable) bool) error {
+	for page != nil {
+		for _, signIn := range page.GetValue() {
+			if !emit(signIn) {
+				return nil
+			}
+		}
+		nextLink := page.GetOdataNextLink()
+		if nextLink == nil || *nextLink == "" {
+			return nil
+		}
+		var err error
+		if page, err = nextPage(ctx, *nextLink); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// matchesCreatedDateTimeQuals reports whether Postgres could accept the sign-in's created_date_time
+// under the created_date_time quals. Graph keeps 100 ns precision and Postgres microseconds, so it
+// passes if either truncating or rounding to the microsecond satisfies every qual.
+func matchesCreatedDateTimeQuals(created *time.Time, keyQuals plugin.KeyColumnQualMap) bool {
+	if keyQuals["created_date_time"] == nil {
+		return true
+	}
+	if created == nil {
+		return false
+	}
+	satisfies := func(at time.Time) bool {
+		for _, q := range keyQuals["created_date_time"].Quals {
+			ts := q.Value.GetTimestampValue()
+			if ts == nil {
+				continue
+			}
+			bound := ts.AsTime()
+			var ok bool
+			switch q.Operator {
+			case ">":
+				ok = at.After(bound)
+			case ">=":
+				ok = !at.Before(bound)
+			case "=":
+				ok = at.Equal(bound)
+			case "<=":
+				ok = !at.After(bound)
+			case "<":
+				ok = at.Before(bound)
+			default:
+				ok = true
+			}
+			if !ok {
+				return false
+			}
+		}
+		return true
+	}
+	return satisfies(created.Truncate(time.Microsecond)) || satisfies(created.Round(time.Microsecond))
 }
 
 // buildSignInReportQueryFilter renders the pushed-down quals as an OData $filter, so Graph pages
