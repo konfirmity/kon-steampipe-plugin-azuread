@@ -40,6 +40,8 @@ func Plugin(ctx context.Context) *plugin.Plugin {
 			"azuread_conditional_access_named_location":            tableAzureAdConditionalAccessNamedLocation(ctx),
 			"azuread_conditional_access_policy":                    tableAzureAdConditionalAccessPolicy(ctx),
 			"azuread_cross_tenant_access_policy":                   tableAzureAdCrossTenantAccessPolicy(ctx),
+			"azuread_defender_machine":                             tableAzureAdDefenderMachine(ctx),
+			"azuread_defender_software_vulnerability":              tableAzureAdDefenderSoftwareVulnerability(ctx),
 			"azuread_device_registration_policy":                   tableAzureAdDeviceRegistrationPolicy(ctx),
 			"azuread_device":                                       tableAzureAdDevice(ctx),
 			"azuread_directory_audit_report":                       tableAzureAdDirectoryAuditReport(ctx),
