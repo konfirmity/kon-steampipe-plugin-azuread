@@ -68,3 +68,14 @@ func isIgnorableErrorPredicate(ignoreErrorCodes []string) plugin.ErrorPredicateW
 		return false
 	}
 }
+
+func isNotFoundError(err *RequestError) bool {
+	if err == nil {
+		return false
+	}
+	switch err.Code {
+	case "Request_ResourceNotFound", "ResourceNotFound", "NotFound":
+		return true
+	}
+	return false
+}

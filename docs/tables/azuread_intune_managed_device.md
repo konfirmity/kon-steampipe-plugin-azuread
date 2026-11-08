@@ -147,3 +147,53 @@ from
 where
   managed_device_owner_type = 'personal';
 ```
+
+### List devices a threat defence partner reports at risk
+Find devices a Mobile Threat Defense partner, such as Microsoft Defender for Endpoint, rates medium severity or worse.
+
+```sql+postgres
+select
+  device_name,
+  user_principal_name,
+  partner_reported_threat_state
+from
+  azuread_intune_managed_device
+where
+  partner_reported_threat_state in ('mediumSeverity', 'highSeverity', 'compromised');
+```
+
+```sql+sqlite
+select
+  device_name,
+  user_principal_name,
+  partner_reported_threat_state
+from
+  azuread_intune_managed_device
+where
+  partner_reported_threat_state in ('mediumSeverity', 'highSeverity', 'compromised');
+```
+
+### List Windows devices whose health attestation reports Secure Boot off
+Read the device health attestation report Intune holds for each Windows device.
+
+```sql+postgres
+select
+  device_name,
+  device_health_attestation_state ->> 'secureBoot' as secure_boot,
+  device_health_attestation_state ->> 'bitLockerStatus' as bitlocker_status
+from
+  azuread_intune_managed_device
+where
+  device_health_attestation_state ->> 'secureBoot' = 'disabled';
+```
+
+```sql+sqlite
+select
+  device_name,
+  json_extract(device_health_attestation_state, '$.secureBoot') as secure_boot,
+  json_extract(device_health_attestation_state, '$.bitLockerStatus') as bitlocker_status
+from
+  azuread_intune_managed_device
+where
+  json_extract(device_health_attestation_state, '$.secureBoot') = 'disabled';
+```
