@@ -52,6 +52,10 @@ func tableAzureAdIntuneManagedDevice(_ context.Context) *plugin.Table {
 			{Name: "jail_broken", Type: proto.ColumnType_STRING, Description: "Whether the device is jail broken or rooted.", Transform: transform.FromMethod("GetJailBroken")},
 			{Name: "wifi_mac_address", Type: proto.ColumnType_STRING, Description: "The Wi-Fi MAC address of the device.", Transform: transform.FromMethod("GetWiFiMacAddress")},
 			{Name: "ethernet_mac_address", Type: proto.ColumnType_STRING, Description: "The Ethernet MAC address of the device.", Transform: transform.FromMethod("GetEthernetMacAddress")},
+			{Name: "is_supervised", Type: proto.ColumnType_BOOL, Description: "Whether the device is supervised (Apple devices).", Transform: transform.FromMethod("GetIsSupervised")},
+			{Name: "partner_reported_threat_state", Type: proto.ColumnType_STRING, Description: "The threat state a Mobile Threat Defense partner reports for the device. Possible values are: unknown, activated, deactivated, secured, lowSeverity, mediumSeverity, highSeverity, unresponsive, compromised, misconfigured.", Transform: transform.FromMethod("PartnerReportedThreatState")},
+			{Name: "azure_ad_registered", Type: proto.ColumnType_BOOL, Description: "Whether the device is registered in Microsoft Entra ID.", Transform: transform.FromMethod("GetAzureADRegistered")},
+			{Name: "device_health_attestation_state", Type: proto.ColumnType_JSON, Description: "The Windows device health attestation report, for example bitLockerStatus, secureBoot and codeIntegrity.", Transform: transform.FromMethod("DeviceHealthAttestationState")},
 
 			// Standard columns
 			{Name: "title", Type: proto.ColumnType_STRING, Description: ColumnDescriptionTitle, Transform: transform.FromMethod("GetDeviceName")},

@@ -45,8 +45,6 @@ GetGraphClient creates a graph service client configured from (~/.steampipe/conf
 4. CLI
 */
 func GetGraphClient(ctx context.Context, d *plugin.QueryData) (*msgraphsdkgo.GraphServiceClient, *msgraphsdkgo.GraphRequestAdapter, error) {
-	logger := plugin.Logger(ctx)
-
 	// Disable caching since it only saves ~.25ms and results in an SDK error
 	// when running consecutive queries for the sign_in_report and service_principal
 	// tables:
@@ -57,121 +55,9 @@ func GetGraphClient(ctx context.Context, d *plugin.QueryData) (*msgraphsdkgo.Gra
 	// 	return cachedData.(*msgraphsdkgo.GraphServiceClient), nil, nil
 	// }
 
-	var tenantID, environment, clientID, clientSecret, certificatePath, certificatePassword string
-
-	azureADConfig := GetConfig(d.Connection)
-	if azureADConfig.TenantID != nil {
-		tenantID = *azureADConfig.TenantID
-	} else {
-		tenantID = os.Getenv("AZURE_TENANT_ID")
-	}
-
-	if azureADConfig.Environment != nil {
-		environment = *azureADConfig.Environment
-	} else {
-		environment = os.Getenv("AZURE_ENVIRONMENT")
-	}
-
-	var enableMsi bool
-	if azureADConfig.EnableMsi != nil {
-		enableMsi = *azureADConfig.EnableMsi
-	}
-
-	// 1. Client secret credentials
-	if azureADConfig.ClientID != nil {
-		clientID = *azureADConfig.ClientID
-	} else {
-		clientID = os.Getenv("AZURE_CLIENT_ID")
-	}
-
-	if azureADConfig.ClientSecret != nil {
-		clientSecret = *azureADConfig.ClientSecret
-	} else {
-		clientSecret = os.Getenv("AZURE_CLIENT_SECRET")
-	}
-
-	// 2. Client certificate credentials
-	if azureADConfig.CertificatePath != nil {
-		certificatePath = *azureADConfig.CertificatePath
-	} else {
-		certificatePath = os.Getenv("AZURE_CERTIFICATE_PATH")
-	}
-
-	if azureADConfig.CertificatePassword != nil {
-		certificatePassword = *azureADConfig.CertificatePassword
-	} else {
-		certificatePassword = os.Getenv("AZURE_CERTIFICATE_PASSWORD")
-	}
-
-	cloudConfiguration := getCloudConfiguration(environment)
-
-	var cred azcore.TokenCredential
-	var err error
-	if tenantID == "" { // CLI authentication
-		cred, err = azidentity.NewAzureCLICredential(
-			&azidentity.AzureCLICredentialOptions{},
-		)
-		if err != nil {
-			logger.Error("GetGraphClient", "cli_credential_error", err)
-			return nil, nil, err
-		}
-	} else if tenantID != "" && clientID != "" && clientSecret != "" { // Client secret authentication
-		cred, err = azidentity.NewClientSecretCredential(
-			tenantID,
-			clientID,
-			clientSecret,
-			&azidentity.ClientSecretCredentialOptions{
-				ClientOptions: policy.ClientOptions{
-					Cloud: cloudConfiguration,
-				},
-			},
-		)
-		if err != nil {
-			logger.Error("GetGraphClient", "client_secret_credential_error", err)
-			return nil, nil, err
-		}
-	} else if tenantID != "" && clientID != "" && certificatePath != "" { // Client certificate authentication
-		// Load certificate from given path
-		loadFile, err := os.ReadFile(certificatePath)
-		if err != nil {
-			return nil, nil, fmt.Errorf("error reading certificate from %s: %v", certificatePath, err)
-		}
-
-		var certs []*x509.Certificate
-		var key crypto.PrivateKey
-		if certificatePassword == "" {
-			certs, key, err = azidentity.ParseCertificates(loadFile, nil)
-		} else {
-			certs, key, err = azidentity.ParseCertificates(loadFile, []byte(certificatePassword))
-		}
-
-		if err != nil {
-			return nil, nil, fmt.Errorf("error parsing certificate from %s: %v", certificatePath, err)
-		}
-
-		cred, err = azidentity.NewClientCertificateCredential(
-			tenantID,
-			clientID,
-			certs,
-			key,
-			&azidentity.ClientCertificateCredentialOptions{
-				ClientOptions: policy.ClientOptions{
-					Cloud: cloudConfiguration,
-				},
-			},
-		)
-		if err != nil {
-			logger.Error("GetGraphClient", "client_certificate_credential_error", err)
-			return nil, nil, err
-		}
-	} else if enableMsi { // Managed identity authentication
-		cred, err = azidentity.NewManagedIdentityCredential(
-			&azidentity.ManagedIdentityCredentialOptions{},
-		)
-		if err != nil {
-			logger.Error("GetGraphClient", "managed_identity_credential_error", err)
-			return nil, nil, err
-		}
+	cred, environment, err := newAzureCredential(ctx, d, "GetGraphClient")
+	if err != nil {
+		return nil, nil, err
 	}
 
 	// update the Authentication provider scope if env is china cloud or us gov
@@ -222,6 +108,49 @@ GetGraphBetaClient creates a beta graph service client configured from (~/.steam
 4. CLI
 */
 func GetGraphBetaClient(ctx context.Context, d *plugin.QueryData) (*msgraphsdkbeta.GraphServiceClient, *msgraphsdkbeta.GraphRequestAdapter, error) {
+	cred, environment, err := newAzureCredential(ctx, d, "GetGraphBetaClient")
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// update the Authentication provider scope if env is china cloud or us gov
+	var auth *a.AzureIdentityAuthenticationProvider
+	switch environment {
+	case environmentAzureChinaCloud:
+		auth, err = a.NewAzureIdentityAuthenticationProviderWithScopes(cred, []string{
+			"https://microsoftgraph.chinacloudapi.cn/.default",
+		})
+	case environmentAzureUSGovernmentCloud:
+		auth, err = a.NewAzureIdentityAuthenticationProviderWithScopes(cred, []string{
+			"https://graph.microsoft.us/.default",
+		})
+	default:
+		auth, err = a.NewAzureIdentityAuthenticationProvider(cred)
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("error creating authentication provider: %v", err)
+	}
+
+	adapter, err := msgraphsdkbeta.NewGraphRequestAdapter(auth)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error creating graph adapter: %v", err)
+	}
+
+	// update the baseurl if env is china cloud or us gov
+	switch environment {
+	case environmentAzureChinaCloud:
+		adapter.SetBaseUrl("https://microsoftgraph.chinacloudapi.cn/beta")
+	case environmentAzureUSGovernmentCloud:
+		adapter.SetBaseUrl("https://graph.microsoft.us/beta")
+	}
+
+	client := msgraphsdkbeta.NewGraphServiceClient(adapter)
+
+	return client, adapter, nil
+}
+
+// newAzureCredential builds the token credential the connection config selects, and returns its cloud environment.
+func newAzureCredential(ctx context.Context, d *plugin.QueryData, caller string) (azcore.TokenCredential, string, error) {
 	logger := plugin.Logger(ctx)
 
 	var tenantID, environment, clientID, clientSecret, certificatePath, certificatePassword string
@@ -279,8 +208,8 @@ func GetGraphBetaClient(ctx context.Context, d *plugin.QueryData) (*msgraphsdkbe
 			&azidentity.AzureCLICredentialOptions{},
 		)
 		if err != nil {
-			logger.Error("GetGraphBetaClient", "cli_credential_error", err)
-			return nil, nil, err
+			logger.Error(caller, "cli_credential_error", err)
+			return nil, "", err
 		}
 	} else if tenantID != "" && clientID != "" && clientSecret != "" { // Client secret authentication
 		cred, err = azidentity.NewClientSecretCredential(
@@ -294,14 +223,14 @@ func GetGraphBetaClient(ctx context.Context, d *plugin.QueryData) (*msgraphsdkbe
 			},
 		)
 		if err != nil {
-			logger.Error("GetGraphBetaClient", "client_secret_credential_error", err)
-			return nil, nil, err
+			logger.Error(caller, "client_secret_credential_error", err)
+			return nil, "", err
 		}
 	} else if tenantID != "" && clientID != "" && certificatePath != "" { // Client certificate authentication
 		// Load certificate from given path
 		loadFile, err := os.ReadFile(certificatePath)
 		if err != nil {
-			return nil, nil, fmt.Errorf("error reading certificate from %s: %v", certificatePath, err)
+			return nil, "", fmt.Errorf("error reading certificate from %s: %v", certificatePath, err)
 		}
 
 		var certs []*x509.Certificate
@@ -313,7 +242,7 @@ func GetGraphBetaClient(ctx context.Context, d *plugin.QueryData) (*msgraphsdkbe
 		}
 
 		if err != nil {
-			return nil, nil, fmt.Errorf("error parsing certificate from %s: %v", certificatePath, err)
+			return nil, "", fmt.Errorf("error parsing certificate from %s: %v", certificatePath, err)
 		}
 
 		cred, err = azidentity.NewClientCertificateCredential(
@@ -328,53 +257,20 @@ func GetGraphBetaClient(ctx context.Context, d *plugin.QueryData) (*msgraphsdkbe
 			},
 		)
 		if err != nil {
-			logger.Error("GetGraphBetaClient", "client_certificate_credential_error", err)
-			return nil, nil, err
+			logger.Error(caller, "client_certificate_credential_error", err)
+			return nil, "", err
 		}
 	} else if enableMsi { // Managed identity authentication
 		cred, err = azidentity.NewManagedIdentityCredential(
 			&azidentity.ManagedIdentityCredentialOptions{},
 		)
 		if err != nil {
-			logger.Error("GetGraphBetaClient", "managed_identity_credential_error", err)
-			return nil, nil, err
+			logger.Error(caller, "managed_identity_credential_error", err)
+			return nil, "", err
 		}
 	}
 
-	// update the Authentication provider scope if env is china cloud or us gov
-	var auth *a.AzureIdentityAuthenticationProvider
-	switch environment {
-	case environmentAzureChinaCloud:
-		auth, err = a.NewAzureIdentityAuthenticationProviderWithScopes(cred, []string{
-			"https://microsoftgraph.chinacloudapi.cn/.default",
-		})
-	case environmentAzureUSGovernmentCloud:
-		auth, err = a.NewAzureIdentityAuthenticationProviderWithScopes(cred, []string{
-			"https://graph.microsoft.us/.default",
-		})
-	default:
-		auth, err = a.NewAzureIdentityAuthenticationProvider(cred)
-	}
-	if err != nil {
-		return nil, nil, fmt.Errorf("error creating authentication provider: %v", err)
-	}
-
-	adapter, err := msgraphsdkbeta.NewGraphRequestAdapter(auth)
-	if err != nil {
-		return nil, nil, fmt.Errorf("error creating graph adapter: %v", err)
-	}
-
-	// update the baseurl if env is china cloud or us gov
-	switch environment {
-	case environmentAzureChinaCloud:
-		adapter.SetBaseUrl("https://microsoftgraph.chinacloudapi.cn/beta")
-	case environmentAzureUSGovernmentCloud:
-		adapter.SetBaseUrl("https://graph.microsoft.us/beta")
-	}
-
-	client := msgraphsdkbeta.NewGraphServiceClient(adapter)
-
-	return client, adapter, nil
+	return cred, environment, nil
 }
 
 // https://github.com/Azure/go-autorest/blob/3fb5326fea196cd5af02cf105ca246a0fba59021/autorest/azure/cli/token.go#L126
